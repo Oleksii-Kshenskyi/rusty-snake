@@ -1,0 +1,7 @@
+[package]
+name = "rusty-snake"
+version = "0.0.1"
+edition = "2024"
+
+[dependencies]
+bevy = "0.18.1"
