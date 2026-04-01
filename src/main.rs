@@ -1,6 +1,6 @@
 pub mod config;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use bevy::{
     prelude::*,
@@ -105,9 +105,9 @@ pub struct Snake {
 impl Snake {
     pub fn new(
         start_pos: BoardPos,
-        commands: Commands,
-        meshes: ResMut<Assets<Mesh>>,
-        materials: ResMut<Assets<ColorMaterial>>,
+        commands: &mut Commands,
+        meshes: &mut ResMut<Assets<Mesh>>,
+        materials: &mut ResMut<Assets<ColorMaterial>>,
         board: &Board,
     ) -> Self {
         let mut snake = Self {
@@ -122,9 +122,9 @@ impl Snake {
 
     pub fn spawn_segment(
         &mut self,
-        mut commands: Commands,
-        mut meshes: ResMut<Assets<Mesh>>,
-        mut materials: ResMut<Assets<ColorMaterial>>,
+        commands: &mut Commands,
+        meshes: &mut ResMut<Assets<Mesh>>,
+        materials: &mut ResMut<Assets<ColorMaterial>>,
         board: &Board,
     ) -> Entity {
         let is_head = self.snake_segments.is_empty();
@@ -152,12 +152,16 @@ impl Snake {
     }
 }
 
+#[derive(Component, Clone, Debug)]
+pub struct Apple;
+
 #[derive(Resource)]
 pub struct Board {
     pub maximize_shenanigans: MaximizeShenanigans,
     column_count: u32,
     row_count: u32,
     snake: Option<Snake>,
+    apple: Option<BoardPos>,
 }
 
 impl Board {
@@ -167,6 +171,7 @@ impl Board {
             column_count: 0,
             row_count: 0,
             snake: None,
+            apple: None,
         }
     }
     pub fn set_size_once(&mut self, cols: u32, rows: u32) {
@@ -179,6 +184,35 @@ impl Board {
     }
     pub fn rows(&self) -> u32 {
         self.row_count
+    }
+
+    pub fn grow_apple(
+        &mut self,
+        rng: &mut ResMut<GameRng>,
+        commands: &mut Commands,
+        meshes: &mut ResMut<Assets<Mesh>>,
+        materials: &mut ResMut<Assets<ColorMaterial>>,
+    ) {
+        let conflicting_tiles = if let Some(snake) = &self.snake {
+            snake.snake_segments.keys().cloned().collect()
+        } else {
+            HashSet::new()
+        };
+        let apple_pos = loop {
+            let maybe_pos = rng.random_pos(0..self.cols(), 0..self.rows());
+            if !conflicting_tiles.contains(&maybe_pos) {
+                break maybe_pos;
+            }
+        };
+        let apple_world_pos = board_pos_to_world(&apple_pos, self);
+        self.apple = Some(apple_pos);
+
+        commands.spawn((
+            Mesh2d(meshes.add(Rectangle::new(TILE_SIZE, TILE_SIZE))),
+            MeshMaterial2d(materials.add(Color::srgb_from_array(APPLE_COLOR))),
+            Transform::from_xyz(apple_world_pos.0, apple_world_pos.1, 0.0),
+            Apple,
+        ));
     }
 }
 
@@ -245,13 +279,12 @@ fn is_maximized(board: Res<Board>) -> bool {
     board.maximize_shenanigans.assume_maximize_happened
 }
 
-// TODO: actually spawn the goddamn snake!!
 fn spawn_snake(
     board: &mut Board,
     rng: &mut ResMut<GameRng>,
-    commands: Commands,
-    meshes: ResMut<Assets<Mesh>>,
-    materials: ResMut<Assets<ColorMaterial>>,
+    commands: &mut Commands,
+    meshes: &mut ResMut<Assets<Mesh>>,
+    materials: &mut ResMut<Assets<ColorMaterial>>,
 ) {
     let x_center = board.cols() / 2;
     let y_center = board.rows() / 2;
@@ -265,17 +298,27 @@ fn spawn_snake(
     let snake_pos = rng.random_pos(x_start..=x_end, y_start..=y_end);
 
     board.snake = Some(Snake::new(snake_pos, commands, meshes, materials, board));
-    error!("Put snake at {:?}!", snake_pos);
 }
-fn update_snake(
+
+// TODO: make snake move and grow?
+fn update_board(
     mut board: ResMut<Board>,
     mut rng: ResMut<GameRng>,
-    commands: Commands,
-    meshes: ResMut<Assets<Mesh>>,
-    materials: ResMut<Assets<ColorMaterial>>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
     if board.snake.is_none() {
-        spawn_snake(&mut board, &mut rng, commands, meshes, materials);
+        spawn_snake(
+            &mut board,
+            &mut rng,
+            &mut commands,
+            &mut meshes,
+            &mut materials,
+        );
+    }
+    if board.apple.is_none() {
+        board.grow_apple(&mut rng, &mut commands, &mut meshes, &mut materials);
     }
 }
 
@@ -295,7 +338,7 @@ fn main() {
         }))
         .add_systems(Startup, init_game)
         .add_systems(Update, on_window_resized)
-        .add_systems(Update, update_snake.run_if(is_maximized))
+        .add_systems(Update, update_board.run_if(is_maximized))
         .add_systems(Update, draw_grid_lines)
         .run();
 }
