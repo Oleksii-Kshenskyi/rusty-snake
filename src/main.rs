@@ -16,6 +16,24 @@ pub struct BoardPos {
     pub y: u32,
 }
 
+#[derive(Component, Clone, Debug, PartialEq, Eq)]
+pub enum Direction {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+impl Direction {
+    pub fn to_delta(&self) -> (i32, i32) {
+        match self {
+            Direction::Up => (0, -1),
+            Direction::Left => (-1, 0),
+            Direction::Right => (1, 0),
+            Direction::Down => (0, 1),
+        }
+    }
+}
+
 fn board_pos_to_world(pos: &BoardPos, board: &Board) -> (f32, f32) {
     let grid_width = board.cols() as f32 * TILE_SIZE;
     let grid_height = board.rows() as f32 * TILE_SIZE;
@@ -67,6 +85,7 @@ impl GameRng {
     }
 }
 
+#[derive(Debug)]
 pub struct MaximizeShenanigans {
     pub last_known_size: u64,
     pub assume_maximize_happened: bool,
@@ -78,14 +97,6 @@ impl MaximizeShenanigans {
             assume_maximize_happened: false,
         }
     }
-}
-
-#[derive(Component, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Direction {
-    Up,
-    Down,
-    Left,
-    Right,
 }
 
 #[derive(Component, Clone)]
@@ -155,12 +166,13 @@ impl Snake {
 #[derive(Component, Clone, Debug)]
 pub struct Apple;
 
-#[derive(Resource)]
+// FIXME: Board should not hold references to snake, apple, or anything else. Rely on Bevy's ECS for that.
+#[derive(Resource, Debug)]
 pub struct Board {
     pub maximize_shenanigans: MaximizeShenanigans,
     column_count: u32,
     row_count: u32,
-    snake: Option<Snake>,
+    snake: Option<Entity>,
     apple: Option<BoardPos>,
 }
 
@@ -184,35 +196,6 @@ impl Board {
     }
     pub fn rows(&self) -> u32 {
         self.row_count
-    }
-
-    pub fn grow_apple(
-        &mut self,
-        rng: &mut ResMut<GameRng>,
-        commands: &mut Commands,
-        meshes: &mut ResMut<Assets<Mesh>>,
-        materials: &mut ResMut<Assets<ColorMaterial>>,
-    ) {
-        let conflicting_tiles = if let Some(snake) = &self.snake {
-            snake.snake_segments.keys().cloned().collect()
-        } else {
-            HashSet::new()
-        };
-        let apple_pos = loop {
-            let maybe_pos = rng.random_pos(0..self.cols(), 0..self.rows());
-            if !conflicting_tiles.contains(&maybe_pos) {
-                break maybe_pos;
-            }
-        };
-        let apple_world_pos = board_pos_to_world(&apple_pos, self);
-        self.apple = Some(apple_pos);
-
-        commands.spawn((
-            Mesh2d(meshes.add(Rectangle::new(TILE_SIZE, TILE_SIZE))),
-            MeshMaterial2d(materials.add(Color::srgb_from_array(APPLE_COLOR))),
-            Transform::from_xyz(apple_world_pos.0, apple_world_pos.1, 0.0),
-            Apple,
-        ));
     }
 }
 
@@ -279,12 +262,15 @@ fn is_maximized(board: Res<Board>) -> bool {
     board.maximize_shenanigans.assume_maximize_happened
 }
 
+fn snake_missing(board: Res<Board>) -> bool {
+    board.snake.is_none()
+}
 fn spawn_snake(
-    board: &mut Board,
-    rng: &mut ResMut<GameRng>,
-    commands: &mut Commands,
-    meshes: &mut ResMut<Assets<Mesh>>,
-    materials: &mut ResMut<Assets<ColorMaterial>>,
+    mut board: ResMut<Board>,
+    mut rng: ResMut<GameRng>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
     let x_center = board.cols() / 2;
     let y_center = board.rows() / 2;
@@ -297,29 +283,59 @@ fn spawn_snake(
     let y_end = y_center + offset_y;
     let snake_pos = rng.random_pos(x_start..=x_end, y_start..=y_end);
 
-    board.snake = Some(Snake::new(snake_pos, commands, meshes, materials, board));
+    let snake_struct = Snake::new(
+        snake_pos,
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        &board,
+    );
+    board.snake = Some(dbg!(commands.spawn(snake_struct).id()));
 }
 
-// TODO: make snake move and grow?
-fn update_board(
+// NOTE: this can bite me in the ass in the future. I may not want to instantly spawn apple each time it is missing. Or this may work fine. Check this AFTER interaction for snake eating the apple is implemented.
+fn apple_missing(board: Res<Board>) -> bool {
+    board.apple.is_none()
+}
+fn grow_apple(
     mut board: ResMut<Board>,
+    mut snake_query: Query<&Snake>,
     mut rng: ResMut<GameRng>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
-    if board.snake.is_none() {
-        spawn_snake(
-            &mut board,
-            &mut rng,
-            &mut commands,
-            &mut meshes,
-            &mut materials,
-        );
-    }
-    if board.apple.is_none() {
-        board.grow_apple(&mut rng, &mut commands, &mut meshes, &mut materials);
-    }
+    let conflicting_tiles = if let Some(snake_ent) = board.snake {
+        let snek = snake_query.get_mut(snake_ent).unwrap();
+        snek.snake_segments.keys().cloned().collect()
+    } else {
+        HashSet::new()
+    };
+    let apple_pos = loop {
+        let maybe_pos = rng.random_pos(0..board.cols(), 0..board.rows());
+        if !conflicting_tiles.contains(&maybe_pos) {
+            break maybe_pos;
+        }
+    };
+    let apple_world_pos = board_pos_to_world(&apple_pos, &board);
+    board.apple = Some(apple_pos);
+
+    commands.spawn((
+        Mesh2d(meshes.add(Rectangle::new(TILE_SIZE, TILE_SIZE))),
+        MeshMaterial2d(materials.add(Color::srgb_from_array(APPLE_COLOR))),
+        Transform::from_xyz(apple_world_pos.0, apple_world_pos.1, 0.0),
+        Apple,
+    ));
+}
+
+// TODO: Already did move board pos method for Direction.
+// Now add Direction to Snake/Snake Segments and try to move the snake.
+// Right now I believe that involves first moving all the snake segments in the Board resource,
+// And second (potentially a separate system) - moving transform components (so that the movement reflects on the screen).
+// POTENTIAL GOTCHAS: When does user input come in? Is it a separate system or can be done in move_snake() as well? Maybe look at Bevy observers? In that case, maybe movement just changes head direction, and then we go from there.
+// Does that mean that each segment has its own movement direction? If so, when do segment directions change? Automatically somehow, or do I need to update segment directions manually as well?
+fn move_snake() {
+    error!("move_snake()????");
 }
 
 fn main() {
@@ -328,6 +344,7 @@ fn main() {
         .insert_resource(GameRng::new())
         .insert_resource(Board::new())
         .insert_resource(MainWindowDesc::new())
+        .insert_resource(Time::<Fixed>::from_seconds(0.167))
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 resolution: (800, 600).into(),
@@ -338,7 +355,18 @@ fn main() {
         }))
         .add_systems(Startup, init_game)
         .add_systems(Update, on_window_resized)
-        .add_systems(Update, update_board.run_if(is_maximized))
+        .add_systems(
+            Update,
+            spawn_snake.run_if(is_maximized).run_if(snake_missing),
+        )
+        .add_systems(
+            Update,
+            grow_apple
+                .run_if(is_maximized)
+                .run_if(apple_missing)
+                .after(spawn_snake),
+        )
+        .add_systems(FixedUpdate, move_snake.run_if(is_maximized))
         .add_systems(Update, draw_grid_lines)
         .run();
 }
